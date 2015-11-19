@@ -9,6 +9,7 @@ module Halogen
   , module Halogen.Driver
   , module Halogen.Effects
   , module Halogen.Query
+  , module Halogen.Internal.Address
   , module Data.NaturalTransformation
   ) where
 
@@ -20,12 +21,13 @@ import Halogen.Component
 import Halogen.Driver
 import Halogen.Effects
 import Halogen.Query
-import qualified Halogen.HTML.Core as C
+import Halogen.Internal.Address (Address(), Send(), send, nothing)
+import Halogen.HTML.Core as C
 
 -- | A specialised version of the `Halogen.HTML.Core.HTML` type where `i` is
--- | `* -> *` kinded to match the kind of a component query algebra.
-type HTML p i = C.HTML p (i Unit)
+-- | fixed to the `Send` type
+type HTML p = C.HTML p Send
 
 -- | A specialised version of the `Halogen.HTML.Core.Prop` type where `i` is
--- | `* -> *` kinded to match the kind of a component query algebra.
-type Prop i = C.Prop (i Unit)
+-- | fixed to the `Send` type
+type Prop = C.Prop Send

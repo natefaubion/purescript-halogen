@@ -22,13 +22,13 @@ ui :: forall g. (Functor g) => Component State Query g
 ui = component render eval
   where
 
-  render :: State -> ComponentHTML Query
-  render state =
+  render :: Address Query -> State -> ComponentHTML
+  render here state =
     H.div_
       [ H.h1_
           [ H.text "Toggle Button" ]
       , H.button
-          [ E.onClick (E.input_ ToggleState) ]
+          [ E.onClick (E.input_ here ToggleState) ]
           [ H.text (if state.on then "On" else "Off") ]
       ]
 

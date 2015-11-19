@@ -12,14 +12,15 @@ import Halogen.Query (Action(), action)
 import Halogen.HTML.Events.Handler (EventHandler(), preventDefault, stopPropagation, stopImmediatePropagation)
 import Halogen.HTML.Events.Types (Event(), MouseEvent(), FocusEvent(), KeyboardEvent())
 import Halogen.HTML.Core (Prop(), handler, eventName)
+import Halogen.Internal.Address (Address(), Send(), send)
 
 type EventProp e i = (Event e -> EventHandler i) -> Prop i
 
-input :: forall f a. (a -> Action f) -> a -> EventHandler (f Unit)
-input f x = pure $ action (f x)
+input :: forall f a. Address f -> (a -> Action f) -> a -> EventHandler Send
+input address action x = pure (send address (action x))
 
-input_ :: forall f a. Action f -> a -> EventHandler (f Unit)
-input_ f _ = pure $ action f
+input_ :: forall f a. Address f -> Action f -> a -> EventHandler Send
+input_ address = input address <<< const
 
 onAbort :: forall i. EventProp () i
 onAbort = handler (eventName "abort")

@@ -74,10 +74,10 @@ element :: forall p i. TagName -> Array (Prop i) -> Array (HTML p i) -> HTML p i
 element = Element Nothing
 
 -- | Populates the slot placeholder values in a `HTML` value.
-fillSlot :: forall p p' i i' m. (Applicative m) => (p -> m (HTML p' i')) -> (i -> i') -> HTML p i -> m (HTML p' i')
-fillSlot _ _ (Text s) = pure $ Text s
-fillSlot f g (Element ns name props els) = Element ns name ((g <$>) <$> props) <$> traverse (fillSlot f g) els
-fillSlot f _ (Slot p) = f p
+fillSlot :: forall p p' i m. (Applicative m) => (p -> m (HTML p' i)) -> HTML p i -> m (HTML p' i)
+fillSlot _ (Text s) = pure $ Text s
+fillSlot f (Element ns name props els) = Element ns name props <$> traverse (fillSlot f) els
+fillSlot f (Slot p) = f p
 
 -- | A property can be:
 -- | - A JavaScript property for an element (typed, and may not have a

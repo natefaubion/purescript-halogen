@@ -13,28 +13,32 @@ import Model
 data TaskQuery a
   = UpdateDescription String a
   | ToggleCompleted Boolean a
-  | Remove a
   | IsCompleted (Boolean -> a)
 
+type TaskProps =
+  { onRemove :: Boolean -> Send
+  , onToggle :: Boolean -> Send
+  }
+
 -- | The task component definition.
-task :: forall g. (Functor g) => Component Task TaskQuery g
-task = component render eval
+task :: forall g. (Functor g) => TaskProps -> Component Task TaskQuery g
+task props = component render eval
   where
 
-  render :: Task -> ComponentHTML TaskQuery
-  render t =
+  render :: Address TaskQuery -> Task -> ComponentHTML
+  render here t =
     H.li_ [ H.input [ P.inputType P.InputCheckbox
                     , P.title "Mark as completed"
                     , P.checked t.completed
-                    , E.onChecked (E.input ToggleCompleted)
+                    , E.onChecked (pure <<< props.onToggle)
                     ]
           , H.input [ P.inputType P.InputText
                     , P.placeholder "Task description"
                     , P.value t.description
-                    , E.onValueChange (E.input UpdateDescription)
+                    , E.onValueChange (E.input here UpdateDescription)
                     ]
           , H.button [ P.title "Remove task"
-                     , E.onClick (E.input_ Remove)
+                     , E.onClick \_ -> pure (props.onRemove t.completed)
                      ]
                      [ H.text "✖" ]
           ]
@@ -46,7 +50,6 @@ task = component render eval
   eval (ToggleCompleted b next) = do
     modify (_ { completed = b })
     pure next
-  eval (Remove next) = pure next
   eval (IsCompleted continue) = do
     b <- gets (_.completed)
     pure (continue b)

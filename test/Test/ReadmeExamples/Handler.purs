@@ -10,5 +10,5 @@ import qualified Halogen.HTML.Events.Handler as EH
 
 data Query a = ToggleState a
 
-handled :: P.IProp (onClick :: P.I) (Query Unit)
-handled = E.onClick (\_ -> EH.preventDefault $> action ToggleState)
+handled :: Address Query -> P.IProp (onClick :: P.I) Send
+handled here = E.onClick \_ -> EH.preventDefault $> send here ToggleState

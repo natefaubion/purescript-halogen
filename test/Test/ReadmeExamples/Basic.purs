@@ -18,9 +18,9 @@ myComponent :: forall g. Component State Query g
 myComponent = component render eval
   where
 
-  render :: Render State Query
-  render state =
-    H.div_ [ H.button [ E.onClick (E.input_ ToggleState) ]
+  render :: Address Query -> State -> ComponentHTML
+  render here state =
+    H.div_ [ H.button [ E.onClick (E.input_ here ToggleState) ]
                       [ H.text (if state.on then "On" else "Off") ]
            ]
 

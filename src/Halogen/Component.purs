@@ -31,6 +31,8 @@ module Halogen.Component
 
 import Prelude
 
+import Unsafe.Coerce (unsafeCoerce)
+
 import Control.Apply ((<*))
 import Control.Bind ((=<<))
 import Control.Coroutine (await)
@@ -59,6 +61,7 @@ import Halogen.HTML.Core (HTML(..), fillSlot)
 import Halogen.Query (HalogenF(..), get, modify, liftH, hoistHalogenF, transformHF)
 import Halogen.Query.StateF (StateF(..), mapState)
 import Halogen.Query.SubscribeF (SubscribeF(), subscribeN, hoistSubscribe, transformSubscribe)
+import Halogen.Internal.Address (Address(), mkAddress, runAddress, cmapAddress, Send())
 
 -- | Data type for Halogen components.
 -- | - `s` - the component's state
@@ -66,16 +69,16 @@ import Halogen.Query.SubscribeF (SubscribeF(), subscribeN, hoistSubscribe, trans
 -- | - `g` - a functor integrated into the component's query algebra that allows
 -- |         embedding of external DSLs or handling of effects.
 newtype Component s f g = Component
-  { render :: State s (HTML Void (f Unit))
+  { render :: Address f -> State s ComponentHTML
   , eval :: Eval f s f g
   }
 
 -- | The type for `HTML` rendered by a self-contained component.
-type ComponentHTML f = HTML Void (f Unit)
+type ComponentHTML = HTML Void Send
 
 -- | A type alias for a component `render` function - takes the component's
 -- | current state and returns a `HTML` value.
-type Render s f = s -> ComponentHTML f
+type Render s f = Address f -> s -> ComponentHTML
 
 -- | The DSL used in the `eval` function for self-contained components.
 type ComponentDSL s f g = Free (HalogenF s f g)
@@ -90,20 +93,20 @@ type Eval i s f g = Natural i (ComponentDSL s f g)
 
 -- | Builds a self-contained component with no possible children.
 component :: forall s f g. Render s f -> Eval f s f g -> Component s f g
-component r e = Component { render: CMS.gets r, eval: e }
+component r e = Component { render: r >>> (<$> CMS.get), eval: e }
 
 -- | The type for `HTML` rendered by a parent component.
-type ParentHTML s' f f' g p = HTML (SlotConstructor s' f' g p) (f Unit)
+type ParentHTML s' f' g p = HTML (SlotConstructor s' f' g p) Send
 
 -- | A variation on `Render` for parent components - the function follows the
 -- | same form but the type representation is different.
-type RenderParent s s' f f' g p = s -> ParentHTML s' f f' g p
+type RenderParent s s' f f' g p = Address f -> s -> ParentHTML s' f' g p
 
 -- | The type used for slots in the HTML rendered by parent components.
 data SlotConstructor s' f' g p = SlotConstructor p (Unit -> { component :: Component s' f' g, initialState :: s' })
 
 -- | The DSL used in the `eval` and `peek` functions for parent components.
-type ParentDSL s s' f f' g p = ComponentDSL s f (QueryF s s' f f' g p)
+type ParentDSL s s' f f' g p = ComponentDSL s f (QueryF s s' f' g p)
 
 -- | A variation on `Eval` for parent components - the function follows the
 -- | same form but the type representation is different.
@@ -119,10 +122,10 @@ parentComponent
    . (Functor g, Ord p)
   => RenderParent s s' f f' g p
   -> EvalParent f s s' f f' g p
-  -> Component (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
-parentComponent r e = Component { render: render r, eval: eval }
+  -> Component (InstalledState s s' f' g p) (Coproduct f (ChildF p f')) g
+parentComponent r e = Component { render: renderParent r, eval: eval }
   where
-  eval :: Eval (Coproduct f (ChildF p f')) (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
+  eval :: Eval (Coproduct f (ChildF p f')) (InstalledState s s' f' g p) (Coproduct f (ChildF p f')) g
   eval = coproduct (queryParent e) queryChild
 
 -- | Builds a component that may contain child components and additionally
@@ -134,13 +137,13 @@ parentComponent'
   => RenderParent s s' f f' g p
   -> EvalParent f s s' f f' g p
   -> Peek (ChildF p f') s s' f f' g p
-  -> Component (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
-parentComponent' r e p = Component { render: render r, eval: eval }
+  -> Component (InstalledState s s' f' g p) (Coproduct f (ChildF p f')) g
+parentComponent' r e p = Component { render: renderParent r, eval: eval }
   where
-  eval :: Eval (Coproduct f (ChildF p f')) (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
+  eval :: Eval (Coproduct f (ChildF p f')) (InstalledState s s' f' g p) (Coproduct f (ChildF p f')) g
   eval = coproduct (queryParent e) \q -> queryChild q <* peek q
 
-  peek :: forall a. ChildF p f' a -> ComponentDSL (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g Unit
+  peek :: forall a. ChildF p f' a -> ComponentDSL (InstalledState s s' f' g p) (Coproduct f (ChildF p f')) g Unit
   peek =
     p >>> foldFree \h ->
       case h of
@@ -153,21 +156,21 @@ parentComponent' r e p = Component { render: render r, eval: eval }
 -- | state local to the container, `p` is the type of slot used by the
 -- | container, and the remaining parameters are the type variables for the
 -- | child components.
-newtype InstalledState s s' f f' g p = InstalledState
+newtype InstalledState s s' f' g p = InstalledState
   { parent :: s
   , children :: M.Map p (Tuple (Component s' f' g) s')
-  , memo :: M.Map p (HTML Void (Coproduct f (ChildF p f') Unit))
+  , memo :: M.Map p ComponentHTML
   }
 
 -- | Lifts a state value into an `InstalledState` value. Useful when providing
 -- | an initial state value for a parent component.
-installedState :: forall s s' f f' g p. (Ord p) => s -> InstalledState s s' f f' g p
+installedState :: forall s s' f' g p. (Ord p) => s -> InstalledState s s' f' g p
 installedState st = InstalledState { parent: st, children: M.empty, memo: M.empty }
 
 -- | An intermediate algebra that parent components "produce" from their `eval`
 -- | and `peek` functions. This takes the place of `g` when compared to a leaf
 -- | (non-parent) component.
-type QueryF s s' f f' g p = Free (HalogenF (InstalledState s s' f f' g p) (ChildF p f') g)
+type QueryF s s' f' g p = Free (HalogenF (InstalledState s s' f' g p) (ChildF p f') g)
 
 -- | An intermediate algebra used to associate values from a child component's
 -- | algebra with the slot the component was installed into.
@@ -183,7 +186,7 @@ query
    . (Functor g, Ord p)
   => p
   -> f' i
-  -> Free (HalogenF s f (QueryF s s' f f' g p)) (Maybe i)
+  -> Free (HalogenF s f (QueryF s s' f' g p)) (Maybe i)
 query p q = liftQuery (mkQuery p q)
 
 -- | A version of [`query`](#query) for use when a parent component has multiple
@@ -194,7 +197,7 @@ query'
   => ChildPath s s' f f' p p'
   -> p
   -> f i
-  -> Free (HalogenF s'' f'' (QueryF s'' s' f'' f' g p')) (Maybe i)
+  -> Free (HalogenF s'' f'' (QueryF s'' s' f' g p')) (Maybe i)
 query' i p q = liftQuery (mkQuery' i p q)
 
 -- | Creates a query for a child component where `p` is the slot the component
@@ -203,11 +206,11 @@ query' i p q = liftQuery (mkQuery' i p q)
 -- | If a component is not found for the slot the result of the query
 -- | will be `Nothing`.
 mkQuery
-  :: forall s s' f f' p g i
+  :: forall s s' f' p g i
    . (Functor g, Ord p)
   => p
   -> f' i
-  -> QueryF s s' f f' g p (Maybe i)
+  -> QueryF s s' f' g p (Maybe i)
 mkQuery p q = do
   InstalledState st <- get
   for (M.lookup p st.children) \(Tuple c _) ->
@@ -216,12 +219,12 @@ mkQuery p q = do
 -- | A version of [`mkQuery`](#mkQuery) for use when a parent component has
 -- | multiple types of child component.
 mkQuery'
-  :: forall s s' s'' f f' f'' g p p' i
+  :: forall s s' s'' f f' g p p' i
    . (Functor g, Ord p')
   => ChildPath s s' f f' p p'
   -> p
   -> f i
-  -> QueryF s'' s' f'' f' g p' (Maybe i)
+  -> QueryF s'' s' f' g p' (Maybe i)
 mkQuery' i p q = mkQuery (injSlot i p) (injQuery i q)
 
 -- | Lifts a value in the `QueryF` algebra into the monad used by a component's
@@ -229,10 +232,10 @@ mkQuery' i p q = mkQuery (injSlot i p) (injQuery i q)
 liftQuery
   :: forall s s' f f' g p
    . (Functor g)
-  => EvalParent (QueryF s s' f f' g p) s s' f f' g p
+  => EvalParent (QueryF s s' f' g p) s s' f f' g p
 liftQuery = liftH
 
-mapStateFParent :: forall s s' f f' g p. Natural (StateF s) (StateF (InstalledState s s' f f' g p))
+mapStateFParent :: forall s s' f' g p. Natural (StateF s) (StateF (InstalledState s s' f' g p))
 mapStateFParent =
   mapState
     (\(InstalledState st) -> st.parent)
@@ -242,7 +245,7 @@ mapStateFParent =
       , memo: st.memo
       })
 
-mapStateFChild :: forall s s' f f' g p. (Ord p) => p -> Natural (StateF s') (StateF (InstalledState s s' f f' g p))
+mapStateFChild :: forall s s' f' g p. (Ord p) => p -> Natural (StateF s') (StateF (InstalledState s s' f' g p))
 mapStateFChild p =
   mapState
     (\(InstalledState st) -> U.fromJust $ snd <$> M.lookup p st.children)
@@ -252,31 +255,38 @@ mapStateFChild p =
       , memo: st.memo
       })
 
-render
+renderParent
   :: forall s s' f f' g p
    . (Ord p)
-  => (s -> HTML (SlotConstructor s' f' g p) (f Unit))
-  -> State (InstalledState s s' f f' g p) (HTML Void ((Coproduct f (ChildF p f')) Unit))
-render rc = do
+  => (Address f -> s -> ParentHTML s' f' g p)
+  -> Address (Coproduct f (ChildF p f'))
+  -> State (InstalledState s s' f' g p) ComponentHTML
+renderParent rc addr = do
     InstalledState st <- CMS.get
-    let html = rc st.parent
+    let html = rc parentAddress st.parent
     -- Empty the state so that we don't keep children that are no longer
     -- being rendered...
     CMS.put $ InstalledState
       { parent: st.parent
       , children: M.empty
       , memo: M.empty
-      } :: InstalledState s s' f f' g p
+      } :: InstalledState s s' f' g p
     -- ...but then pass through the old state so we can lookup child
     -- components that are being re-rendered
-    fillSlot (renderChild (InstalledState st)) left html
+    fillSlot (renderChild (InstalledState st)) html
 
   where
 
+  parentAddress :: Address f
+  parentAddress = cmapAddress left addr
+
+  childAddress :: p -> Address f'
+  childAddress p = cmapAddress (right <<< ChildF p) addr
+
   renderChild
-    :: InstalledState s s' f f' g p
+    :: InstalledState s s' f' g p
     -> SlotConstructor s' f' g p
-    -> State (InstalledState s s' f f' g p) (HTML Void ((Coproduct f (ChildF p f')) Unit))
+    -> State (InstalledState s s' f' g p) ComponentHTML
   renderChild (InstalledState st) (SlotConstructor p def) =
     let childState = M.lookup p st.children
     in case M.lookup p st.memo of
@@ -285,7 +295,7 @@ render rc = do
           { parent: st'.parent
           , children: M.alter (const childState) p st'.children
           , memo: M.insert p html st'.memo
-          } :: InstalledState s s' f f' g p
+          } :: InstalledState s s' f' g p
         pure html
       Nothing -> case childState of
         Just (Tuple c s) -> renderChild' p c s
@@ -297,20 +307,20 @@ render rc = do
     :: p
     -> Component s' f' g
     -> s'
-    -> State (InstalledState s s' f f' g p) (HTML Void ((Coproduct f (ChildF p f')) Unit))
-  renderChild' p c s = case renderComponent c s of
+    -> State (InstalledState s s' f' g p) ComponentHTML
+  renderChild' p c s = case renderComponent c (childAddress p) s of
     Tuple html s' -> do
       CMS.modify \(InstalledState st) -> InstalledState
         { parent: st.parent
         , children: M.insert p (Tuple c s') st.children
         , memo: st.memo
-        } :: InstalledState s s' f f' g p
-      pure $ right <<< ChildF p <$> html
+        } :: InstalledState s s' f' g p
+      pure html
 
 queryParent
   :: forall s s' f f' g p. (Functor g)
   => EvalParent f s s' f f' g p
-  -> Eval f (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
+  -> Eval f (InstalledState s s' f' g p) (Coproduct f (ChildF p f')) g
 queryParent f =
   f >>> foldFree \h ->
     case h of
@@ -319,26 +329,26 @@ queryParent f =
       QueryHF q -> liftChildF q
       HaltHF -> liftF empty
 
-mergeParentStateF :: forall s s' f f' g p. Eval (StateF s) (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
+mergeParentStateF :: forall s s' f f' g p. Eval (StateF s) (InstalledState s s' f' g p) (Coproduct f (ChildF p f')) g
 mergeParentStateF = liftF <<< StateHF <<< mapStateFParent
 
 runSubscribeF
   :: forall s s' f f' g p
    . (Functor g)
-  => Eval f (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
-  -> Eval (SubscribeF f (Free (HalogenF (InstalledState s s' f f' g p) (ChildF p f') g))) (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
+  => Eval f (InstalledState s s' f' g p) (Coproduct f (ChildF p f')) g
+  -> Eval (SubscribeF f (Free (HalogenF (InstalledState s s' f' g p) (ChildF p f') g))) (InstalledState s s' f' g p) (Coproduct f (ChildF p f')) g
 runSubscribeF queryParent' = subscribeN (forever $ lift <<< queryParent' =<< await) <<< hoistSubscribe liftChildF
 
 liftChildF
   :: forall s s' f f' g p
    . (Functor g)
-  => Eval (Free (HalogenF (InstalledState s s' f f' g p) (ChildF p f') g)) (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
+  => Eval (Free (HalogenF (InstalledState s s' f' g p) (ChildF p f') g)) (InstalledState s s' f' g p) (Coproduct f (ChildF p f')) g
 liftChildF = mapF (transformHF id right id)
 
 queryChild
   :: forall s s' f f' g p
    . (Functor g, Ord p)
-  => Eval (ChildF p f') (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
+  => Eval (ChildF p f') (InstalledState s s' f' g p) (Coproduct f (ChildF p f')) g
 queryChild (ChildF p q) = do
   modify \(InstalledState st) -> InstalledState
     { parent: st.parent
@@ -368,35 +378,37 @@ transform
   -> (forall a. f' a -> Maybe (f a))
   -> Component s f g
   -> Component s' f' g
-transform reviewS previewS reviewQ previewQ (Component c) =
-  Component
-    { render: maybe (pure $ Text "") render' <<< previewS =<< CMS.get
-    , eval: maybe (liftF HaltHF) (foldFree go <<< c.eval) <<< previewQ
-    }
-  where
+transform = unsafeCoerce unit
+-- transform reviewS previewS reviewQ previewQ (Component c) =
+--   Component
+--     { render: maybe (pure $ Text "") render' <<< previewS =<< CMS.get
+--     , eval: maybe (liftF HaltHF) (foldFree go <<< c.eval) <<< previewQ
+--     }
+--   where
 
-  render' :: s -> State s' (HTML Void (f' Unit))
-  render' st = CMS.StateT (\_ -> bimap (map reviewQ) reviewS <$> CMS.runStateT c.render st)
+--   render' :: s -> State s' (HTML Void (f' Unit))
+--   render' st = CMS.StateT (\_ -> bimap (map reviewQ) reviewS <$> CMS.runStateT c.render st)
 
-  go :: Natural (HalogenF s f g) (Free (HalogenF s' f' g))
-  go (StateHF (Get k)) =
-    liftF <<< maybe HaltHF (\st' -> StateHF (Get (k <<< const st'))) <<< previewS =<< get
-  go (StateHF (Modify f next)) = liftF $ StateHF (Modify (modifyState f) next)
-  go (SubscribeHF q) = liftF $ SubscribeHF (transformSubscribe reviewQ id q)
-  go (QueryHF q) = liftF $ QueryHF q
-  go HaltHF = liftF HaltHF
+--   go :: Natural (HalogenF s f g) (Free (HalogenF s' f' g))
+--   go (StateHF (Get k)) =
+--     liftF <<< maybe HaltHF (\st' -> StateHF (Get (k <<< const st'))) <<< previewS =<< get
+--   go (StateHF (Modify f next)) = liftF $ StateHF (Modify (modifyState f) next)
+--   go (SubscribeHF q) = liftF $ SubscribeHF (transformSubscribe reviewQ id q)
+--   go (QueryHF q) = liftF $ QueryHF q
+--   go HaltHF = liftF HaltHF
 
-  modifyState :: (s -> s) -> s' -> s'
-  modifyState f s' = maybe s' (reviewS <<< f) (previewS s')
+--   modifyState :: (s -> s) -> s' -> s'
+--   modifyState f s' = maybe s' (reviewS <<< f) (previewS s')
 
--- | Transforms a `Component`'s types using a `ChildPath` definition.
+-- -- | Transforms a `Component`'s types using a `ChildPath` definition.
 transformChild
   :: forall s s' f f' g p p'
    . (Functor g)
   => ChildPath s s' f f' p p'
   -> Component s f g
   -> Component s' f' g
-transformChild i = transform (injState i) (prjState i) (injQuery i) (prjQuery i)
+transformChild = unsafeCoerce unit
+-- transformChild i = transform (injState i) (prjState i) (injQuery i) (prjQuery i)
 
 -- | Changes the component's `g` type. A use case for this would be to interpret
 -- | some `Free` monad as `Aff` so the component can be used with `runUI`.
@@ -413,8 +425,8 @@ interpret nat (Component c) =
 
 -- | Runs a component's `render` function with the specified state, returning
 -- | the generated `HTML` and new state.
-renderComponent :: forall s f g. Component s f g -> s -> Tuple (HTML Void (f Unit)) s
-renderComponent (Component c) = runState c.render
+renderComponent :: forall s f g. Component s f g -> Address f -> s -> Tuple ComponentHTML s
+renderComponent (Component c) address = runState (c.render address)
 
 -- | Runs a compnent's `query` function with the specified query input and
 -- | returns the pending computation as a `Free` monad.
