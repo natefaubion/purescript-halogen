@@ -1,10 +1,17 @@
 module Halogen.Component
   ( Component()
   , ComponentHTML()
+  , ComponentTree(..)
+  , ComponentTreeHTML()
+  , RenderHook(..)
+  , Finalized()
+  , runFinalized
+  , ComponentSpec()
   , Render()
   , ComponentDSL()
   , Eval()
   , component
+  , componentSpec
   , ParentHTML()
   , RenderParent()
   , SlotConstructor(..)
@@ -12,7 +19,9 @@ module Halogen.Component
   , EvalParent()
   , Peek()
   , parentComponent
+  , parentComponentSpec
   , parentComponent'
+  , parentComponentSpec'
   , InstalledState()
   , installedState
   , ChildF(..)
@@ -27,6 +36,8 @@ module Halogen.Component
   , interpret
   , renderComponent
   , queryComponent
+  , componentInitializer
+  , componentFinalizer
   ) where
 
 import Prelude
@@ -39,24 +50,34 @@ import Control.Monad.Free.Trans as FT
 import Control.Monad.State (State(), runState)
 import Control.Monad.State.Class as CMS
 import Control.Monad.State.Trans as CMS
+import Control.Monad.Writer.Class as CMW
+import Control.Monad.Writer.Trans (WriterT(), runWriterT)
+import Control.Monad.Writer.Trans as CMW
 
+import Data.Array (snoc)
 import Data.Bifunctor (bimap, lmap, rmap)
+import Data.Either (Either(..))
+import Data.Exists (Exists(), runExists)
+import Data.Foldable (foldl)
 import Data.Functor.Coproduct (Coproduct(), coproduct, left, right)
+import Data.List (List(), filter, catMaybes)
 import Data.Map as M
 import Data.Maybe (Maybe(..), maybe)
 import Data.Maybe.Unsafe as U
 import Data.NaturalTransformation (Natural())
 import Data.Profunctor.Choice (Choice)
 import Data.Traversable (for)
-import Data.Tuple (Tuple(..), snd)
+import Data.Tuple (Tuple(..), fst, snd)
 import Data.Void (Void())
 
 import Halogen.Component.ChildPath (ChildPath(), injState, injQuery, injSlot, prjState, prjQuery)
-import Halogen.HTML.Core (HTML(..), fillSlot)
-import Halogen.Query (get, modify, liftH)
+import Halogen.HTML.Core (HTML(..), fillSlot, foldSlots)
+import Halogen.Query (get, modify, liftH, Action())
 import Halogen.Query.EventSource (EventSource(..), ParentEventSource(), runEventSource, fromParentEventSource)
 import Halogen.Query.HalogenF (HalogenF(), HalogenFP(..), hoistHalogenF, transformHF)
 import Halogen.Query.StateF (StateF(..), mapState)
+
+import Unsafe.Coerce (unsafeCoerce)
 
 -- | Data type for Halogen components.
 -- | - `s` - the component's state
@@ -64,9 +85,57 @@ import Halogen.Query.StateF (StateF(..), mapState)
 -- | - `g` - a functor integrated into the component's query algebra that allows
 -- |         embedding of external DSLs or handling of effects.
 newtype Component s f g = Component
-  { render :: State s (HTML Void (f Unit))
+  { render :: RenderM s f g (ComponentTree f g)
   , eval :: Eval f s f g
+  , initializer :: Maybe (f Unit)
+  , finalizer :: Maybe (f Unit)
   }
+
+newtype ComponentTree f g = ComponentTree
+  { html :: ComponentTreeHTML f g
+  , finalizer :: Maybe (Finalized g)
+  , thunk :: Boolean
+  }
+
+lmapTree :: forall f f' g. Natural f f' -> ComponentTree f g -> ComponentTree f' g
+lmapTree f (ComponentTree t) = ComponentTree
+  { html: bimap (lmapTree f) f t.html
+  , finalizer: t.finalizer
+  , thunk: t.thunk
+  }
+
+rmapTree :: forall f g g'. (Functor g') => Natural g g' -> ComponentTree f g -> ComponentTree f g'
+rmapTree g (ComponentTree t) = ComponentTree
+  { html: bimap (rmapTree g) id t.html
+  , finalizer: runFinalized (\e s i -> finalized (mapF (hoistHalogenF g) <<< e) s i) <$> t.finalizer
+  , thunk: t.thunk
+  }
+
+type RenderM s f g = WriterT (Array (RenderHook f g)) (State s)
+
+data RenderHook f g
+  = PostRender (f Unit)
+  | Finalized (Finalized g)
+
+data FinalizedF s f g = FinalizedF (Eval f s f g) s (f Unit)
+
+foreign import data Finalized :: (* -> *) -> *
+
+finalized :: forall s f g. Eval f s f g -> s -> f Unit -> Finalized g
+finalized e s i = unsafeCoerce (FinalizedF e s i)
+
+runFinalized :: forall g r. (forall s f. Eval f s f g -> s -> f Unit -> r) -> Finalized g -> r
+runFinalized k f = case unsafeCoerce f of FinalizedF e s i -> k e s i
+
+lmapHook :: forall f f' g. Natural f f' -> RenderHook f g -> RenderHook f' g
+lmapHook f (PostRender a) = PostRender (f a)
+lmapHook _ (Finalized a) = Finalized a
+
+-- rmapHook :: forall f g g'. Natural g g' -> RenderHook f g -> RenderHook f g'
+-- rmapHook g (Finalized a) = runFinalized (\e s i -> ) a
+-- rmapHook _ (PostRender a) = PostRender a
+
+type ComponentTreeHTML f g = HTML (ComponentTree f g) (f Unit)
 
 -- | The type for `HTML` rendered by a self-contained component.
 type ComponentHTML f = HTML Void (f Unit)
@@ -86,9 +155,32 @@ type ComponentDSL s f g = Free (HalogenF s f g)
 -- | `i`'s type may differ.
 type Eval i s f g = Natural i (ComponentDSL s f g)
 
+type ComponentSpec s f g =
+  { render :: Render s f
+  , eval :: Eval f s f g
+  , initializer :: Maybe (f Unit)
+  , finalizer :: Maybe (f Unit)
+  }
+
+componentSpec :: forall s f g. ComponentSpec s f g -> Component s f g
+componentSpec spec = Component
+  { render: renderTree
+  , eval: spec.eval
+  , initializer: spec.initializer
+  , finalizer: spec.finalizer
+  }
+  where
+  renderTree = do
+    s <- CMS.get
+    pure $ ComponentTree
+      { html: unsafeCoerce (spec.render s) -- safe because p is Void
+      , finalizer: finalized spec.eval s <$> spec.finalizer
+      , thunk: false
+      }
+
 -- | Builds a self-contained component with no possible children.
 component :: forall s f g. Render s f -> Eval f s f g -> Component s f g
-component r e = Component { render: CMS.gets r, eval: e }
+component r e = componentSpec { render: r, eval: e, initializer: Nothing, finalizer: Nothing }
 
 -- | The type for `HTML` rendered by a parent component.
 type ParentHTML s' f f' g p = HTML (SlotConstructor s' f' g p) (f Unit)
@@ -111,6 +203,28 @@ type EvalParent i s s' f f' g p = Natural i (ParentDSL s s' f f' g p)
 -- | components.
 type Peek i s s' f f' g p = forall a. i a -> ParentDSL s s' f f' g p Unit
 
+type ParentComponentSpec s s' f f' g p =
+  { render :: RenderParent s s' f f' g p
+  , eval :: EvalParent f s s' f f' g p
+  , initializer :: Maybe (f Unit)
+  , finalizer :: Maybe (f Unit)
+  }
+
+parentComponentSpec
+  :: forall s s' f f' g p
+   . (Functor g, Ord p)
+  => ParentComponentSpec s s' f f' g p
+  -> Component (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
+parentComponentSpec spec = Component
+  { render: renderParent spec.render eval (left <$> spec.finalizer)
+  , eval: eval
+  , initializer: left <$> spec.initializer
+  , finalizer: left <$> spec.finalizer
+  }
+  where
+  eval :: Eval (Coproduct f (ChildF p f')) (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
+  eval = coproduct (queryParent spec.eval) queryChild
+
 -- | Builds a component that may contain child components.
 parentComponent
   :: forall s s' f f' g p
@@ -118,10 +232,23 @@ parentComponent
   => RenderParent s s' f f' g p
   -> EvalParent f s s' f f' g p
   -> Component (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
-parentComponent r e = Component { render: render r, eval: eval }
+parentComponent r e = parentComponentSpec { render: r, eval: e, initializer: Nothing, finalizer: Nothing }
+
+parentComponentSpec'
+  :: forall s s' f f' g p
+   . (Functor g, Ord p)
+  => ParentComponentSpec s s' f f' g p
+  -> Peek (ChildF p f') s s' f f' g p
+  -> Component (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
+parentComponentSpec' spec p = Component
+  { render: renderParent spec.render eval (left <$> spec.finalizer)
+  , eval: eval
+  , initializer: left <$> spec.initializer
+  , finalizer: left <$> spec.finalizer
+  }
   where
   eval :: Eval (Coproduct f (ChildF p f')) (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
-  eval = coproduct (queryParent e) queryChild
+  eval = coproduct (queryParent spec.eval) \q -> queryChild q <* queryParent p q
 
 -- | Builds a component that may contain child components and additionally
 -- | supports the `peek` operation to allow the parent to observe queries that
@@ -133,10 +260,7 @@ parentComponent'
   -> EvalParent f s s' f f' g p
   -> Peek (ChildF p f') s s' f f' g p
   -> Component (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
-parentComponent' r e p = Component { render: render r, eval: eval }
-  where
-  eval :: Eval (Coproduct f (ChildF p f')) (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
-  eval = coproduct (queryParent e) \q -> queryChild q <* queryParent p q
+parentComponent' r e = parentComponentSpec' { render: r, eval: e, initializer: Nothing, finalizer: Nothing }
 
 -- | The type used by component containers for their state where `s` is the
 -- | state local to the container, `p` is the type of slot used by the
@@ -145,7 +269,7 @@ parentComponent' r e p = Component { render: render r, eval: eval }
 newtype InstalledState s s' f f' g p = InstalledState
   { parent :: s
   , children :: M.Map p (Tuple (Component s' f' g) s')
-  , memo :: M.Map p (HTML Void (Coproduct f (ChildF p f') Unit))
+  , memo :: M.Map p (ComponentTree (Coproduct f (ChildF p f')) g)
   }
 
 -- | Lifts a state value into an `InstalledState` value. Useful when providing
@@ -218,7 +342,7 @@ mkQuery' i p q = mkQuery (injSlot i p) (injQuery i q)
 liftQuery
   :: forall s s' f f' g p
    . (Functor g)
-  => EvalParent (QueryF s s' f f' g p) s s' f f' g p
+  => Natural (QueryF s s' f f' g p) (ParentDSL s s' f f' g p)
 liftQuery = liftH
 
 mapStateFParent :: forall s s' f f' g p. Natural (StateF s) (StateF (InstalledState s s' f f' g p))
@@ -241,14 +365,16 @@ mapStateFChild p =
       , memo: st.memo
       })
 
-render
+renderParent
   :: forall s s' f f' g p
    . (Ord p)
-  => (s -> HTML (SlotConstructor s' f' g p) (f Unit))
-  -> State (InstalledState s s' f f' g p) (HTML Void ((Coproduct f (ChildF p f')) Unit))
-render rc = do
+  => RenderParent s s' f f' g p
+  -> Eval (Coproduct f (ChildF p f')) (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
+  -> Maybe (Coproduct f (ChildF p f') Unit)
+  -> RenderM (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g (ComponentTree (Coproduct f (ChildF p f')) g)
+renderParent render eval fin = do
     InstalledState st <- CMS.get
-    let html = rc st.parent
+    let html = render st.parent
     -- Empty the state so that we don't keep children that are no longer
     -- being rendered...
     CMS.put $ InstalledState
@@ -258,43 +384,85 @@ render rc = do
       } :: InstalledState s s' f f' g p
     -- ...but then pass through the old state so we can lookup child
     -- components that are being re-rendered
-    fillSlot (renderChild (InstalledState st)) left html
+    html' <- fillSlot (renderChild (InstalledState st)) left html
+    InstalledState st' <- CMS.get :: _ (InstalledState s s' f f' g p)
+
+    let pruned = filter (not <<< flip M.member st'.children) (M.keys st.children)
+        trees = catMaybes $ flip M.lookup st.memo <$> pruned
+
+    CMW.tell $ collectFinalizers trees
+
+    pure $ ComponentTree
+      { html: html'
+      , thunk: false
+      , finalizer: finalized eval (InstalledState st) <$> fin
+      }
 
   where
 
   renderChild
     :: InstalledState s s' f f' g p
     -> SlotConstructor s' f' g p
-    -> State (InstalledState s s' f f' g p) (HTML Void ((Coproduct f (ChildF p f')) Unit))
+    -> RenderM (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g (ComponentTreeHTML (Coproduct f (ChildF p f')) g)
   renderChild (InstalledState st) (SlotConstructor p def) =
     let childState = M.lookup p st.children
     in case M.lookup p st.memo of
-      Just html -> do
+      Just (ComponentTree tree) -> do
         CMS.modify \(InstalledState st') -> InstalledState
           { parent: st'.parent
           , children: M.alter (const childState) p st'.children
-          , memo: M.insert p html st'.memo
+          , memo: M.insert p (ComponentTree tree) st'.memo
           } :: InstalledState s s' f f' g p
-        pure html
+        pure $ Slot $ ComponentTree { html: tree.html , thunk: true , finalizer: tree.finalizer }
+
       Nothing -> case childState of
-        Just (Tuple c s) -> renderChild' p c s
-        Nothing ->
+        Just (Tuple c s) -> do
+          ComponentTree tree <- renderChild' p c s
+          pure $ Slot $ ComponentTree { html: tree.html , thunk: false , finalizer: tree.finalizer }
+        Nothing -> do
           let def' = def unit
-          in renderChild' p def'.component def'.initialState
+          ComponentTree tree <- renderChild' p def'.component def'.initialState
+          case componentInitializer def'.component of
+            Just init -> CMW.tell [ PostRender (right (ChildF p init)) :: RenderHook (Coproduct f (ChildF p f')) g ]
+            _         -> pure unit
+          pure $ Slot $ ComponentTree { html: tree.html , thunk: false , finalizer: tree.finalizer }
 
   renderChild'
     :: p
     -> Component s' f' g
     -> s'
-    -> State (InstalledState s s' f f' g p) (HTML Void ((Coproduct f (ChildF p f')) Unit))
-  renderChild' p c s = case renderComponent c s of
-    Tuple html s' -> do
-      CMS.modify \(InstalledState st) -> InstalledState
-        { parent: st.parent
-        , children: M.insert p (Tuple c s') st.children
-        , memo: st.memo
-        } :: InstalledState s s' f f' g p
-      pure $ right <<< ChildF p <$> html
+    -> RenderM (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g (ComponentTree (Coproduct f (ChildF p f')) g)
+  renderChild' p c s = do
+    let r = renderComponent c s
+
+        adapt :: Natural f' (Coproduct f (ChildF p f'))
+        adapt a = right (ChildF p a)
+
+        tree = ComponentTree
+          { html: bimap (lmapTree adapt) adapt r.html
+          , thunk: false
+          , finalizer: finalized (queryComponent c) r.state <$> componentFinalizer c
+          }
+
+    CMS.modify \(InstalledState st) -> InstalledState
+      { parent: st.parent
+      , children: M.insert p (Tuple c r.state) st.children
+      , memo: M.insert p tree st.memo
+      } :: InstalledState s s' f f' g p
+    CMW.tell $ map (lmapHook adapt) r.hooks :: Array (RenderHook (Coproduct f (ChildF p f')) g)
+    pure tree
+
+collectFinalizers
+  :: forall f g
+   . List (ComponentTree f g)
+  -> Array (RenderHook f g)
+collectFinalizers = foldl collect []
+  where
+  collect acc (ComponentTree tree) =
+    let finalizers = foldSlots collect acc tree.html
+    in case tree.finalizer of
+      Nothing  -> finalizers
+      Just fin -> snoc finalizers (Finalized fin)
 
 queryParent
   :: forall s s' f f' g p a q r. (Functor g)
@@ -310,19 +478,19 @@ queryParent f =
       QueryHF q -> liftChildF q
       HaltHF -> liftF HaltHF
 
-mergeParentStateF :: forall s s' f f' g p. Eval (StateF s) (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
+mergeParentStateF :: forall s s' f f' g p. Natural (StateF s) (ComponentDSL (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g)
 mergeParentStateF = liftF <<< StateHF <<< mapStateFParent
 
 liftChildF
   :: forall s s' f f' g p
    . (Functor g)
-  => Eval (Free (HalogenF (InstalledState s s' f f' g p) (ChildF p f') g)) (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
+  => Natural (Free (HalogenF (InstalledState s s' f f' g p) (ChildF p f') g)) (ComponentDSL (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g)
 liftChildF = mapF (transformHF id right id)
 
 queryChild
   :: forall s s' f f' g p
    . (Functor g, Ord p)
-  => Eval (ChildF p f') (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g
+  => Natural (ChildF p f') (ComponentDSL (InstalledState s s' f f' g p) (Coproduct f (ChildF p f')) g)
 queryChild (ChildF p q) = do
   modify \(InstalledState st) -> InstalledState
     { parent: st.parent
@@ -353,25 +521,31 @@ transform
   -> Component s f g
   -> Component s' f' g
 transform reviewS previewS reviewQ previewQ (Component c) =
-  Component
-    { render: maybe (pure $ Text "") render' <<< previewS =<< CMS.get
-    , eval: maybe (liftF HaltHF) (foldFree go <<< c.eval) <<< previewQ
-    }
-  where
+  unsafeCoerce unit
+--   Component
+--     { render: maybe (pure emptyTree) render' <<< previewS =<< CMS.get
+--     , eval: maybe (liftF HaltHF) (foldFree go <<< c.eval) <<< previewQ
+--     , finalizer: case c.finalizer of
+--         Nothing -> Nothing
+--         Just f -> Just \s' -> maybe (pure unit) f (previewS s')
+--     }
+--   where
 
-  render' :: s -> State s' (HTML Void (f' Unit))
-  render' st = CMS.StateT (\_ -> bimap (map reviewQ) reviewS <$> CMS.runStateT c.render st)
+--   emptyTree = ComponentTree { html: Text "", thunk: false, initializer: Nothing, finalizers: [] }
 
-  go :: Natural (HalogenF s f g) (Free (HalogenF s' f' g))
-  go (StateHF (Get k)) =
-    liftF <<< maybe HaltHF (\st' -> StateHF (Get (k <<< const st'))) <<< previewS =<< get
-  go (StateHF (Modify f next)) = liftF $ StateHF (Modify (modifyState f) next)
-  go (SubscribeHF es next) = liftF $ SubscribeHF (EventSource (FT.interpret (lmap reviewQ) (runEventSource es))) next
-  go (QueryHF q) = liftF $ QueryHF q
-  go HaltHF = liftF HaltHF
+--   render' :: s -> State s' (ComponentTree f' g)
+--   render' st = CMS.StateT (\_ -> bimap (bimapTree reviewQ id) reviewS <$> CMS.runStateT c.render st)
 
-  modifyState :: (s -> s) -> s' -> s'
-  modifyState f s' = maybe s' (reviewS <<< f) (previewS s')
+--   go :: Natural (HalogenF s f g) (Free (HalogenF s' f' g))
+--   go (StateHF (Get k)) =
+--     liftF <<< maybe HaltHF (\st' -> StateHF (Get (k <<< const st'))) <<< previewS =<< get
+--   go (StateHF (Modify f next)) = liftF $ StateHF (Modify (modifyState f) next)
+--   go (SubscribeHF es next) = liftF $ SubscribeHF (EventSource (FT.interpret (lmap reviewQ) (runEventSource es))) next
+--   go (QueryHF q) = liftF $ QueryHF q
+--   go HaltHF = liftF HaltHF
+
+--   modifyState :: (s -> s) -> s' -> s'
+--   modifyState f s' = maybe s' (reviewS <<< f) (previewS s')
 
 -- | Transforms a `Component`'s types using a `ChildPath` definition.
 transformChild
@@ -391,16 +565,27 @@ interpret
   -> Component s f g
   -> Component s f g'
 interpret nat (Component c) =
-  Component { render: c.render
-            , eval: mapF (hoistHalogenF nat) <<< c.eval
-            }
+  unsafeCoerce unit
+  -- Component { render: unsafeCoerce (rmapTree nat <$> c.render)
+  --           , eval: mapF (hoistHalogenF nat) <<< c.eval
+  --           , initializer: unsafeCoerce c.initializer
+  --           , finalizer: unsafeCoerce c.finalizer
+  --           }
 
 -- | Runs a component's `render` function with the specified state, returning
 -- | the generated `HTML` and new state.
-renderComponent :: forall s f g. Component s f g -> s -> Tuple (HTML Void (f Unit)) s
-renderComponent (Component c) = runState c.render
+renderComponent :: forall s f g. Component s f g -> s -> { html :: ComponentTreeHTML f g, hooks :: Array (RenderHook f g), state :: s }
+renderComponent (Component c) s =
+  case runState (runWriterT c.render) s of
+    Tuple (Tuple (ComponentTree tree) hooks) state -> { html: tree.html, hooks: hooks, state: state }
 
 -- | Runs a compnent's `query` function with the specified query input and
 -- | returns the pending computation as a `Free` monad.
 queryComponent :: forall s f g. Component s f g -> Eval f s f g
 queryComponent (Component c) = c.eval
+
+componentInitializer :: forall s f g. Component s f g -> Maybe (f Unit)
+componentInitializer (Component c) = c.initializer
+
+componentFinalizer :: forall s f g. Component s f g -> Maybe (f Unit)
+componentFinalizer (Component c) = c.finalizer

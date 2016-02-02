@@ -3,6 +3,7 @@ module Halogen.HTML.Core
   ( HTML(..)
   , element
   , fillSlot
+  , foldSlots
 
   , Prop(..)
   , PropF(..)
@@ -44,6 +45,7 @@ import Prelude
 import Data.Bifunctor (Bifunctor, rmap)
 import Data.Exists (Exists(), mkExists)
 import Data.ExistsR (ExistsR(), mkExistsR, runExistsR)
+import Data.Foldable (foldl)
 import Data.Maybe (Maybe(..))
 import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..))
@@ -78,6 +80,13 @@ fillSlot :: forall p p' i i' m. (Applicative m) => (p -> m (HTML p' i')) -> (i -
 fillSlot _ _ (Text s) = pure $ Text s
 fillSlot f g (Element ns name props els) = Element ns name ((g <$>) <$> props) <$> traverse (fillSlot f g) els
 fillSlot f _ (Slot p) = f p
+
+foldSlots :: forall a p i. (a -> p -> a) -> a -> HTML p i -> a
+foldSlots f = go
+  where
+  go acc (Slot p) = f acc p
+  go acc (Element ns name props els) = foldl (foldSlots f) acc els
+  go acc _ = acc
 
 -- | A property can be:
 -- | - A JavaScript property for an element (typed, and may not have a
