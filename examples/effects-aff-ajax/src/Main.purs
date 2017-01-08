@@ -3,7 +3,7 @@ module Main where
 import Prelude
 import Control.Monad.Eff (Eff)
 import Halogen.Aff as HA
-import Halogen.VirtualDOM.Driver (runUI)
+import Halogen.VDom.Driver (runUI)
 import Network.HTTP.Affjax as AX
 import Component (ui)
 

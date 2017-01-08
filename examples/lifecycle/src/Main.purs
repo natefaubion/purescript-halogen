@@ -17,7 +17,7 @@ import Halogen.Aff as HA
 import Halogen.HTML as HH
 import Halogen.HTML.Elements.Keyed as HK
 import Halogen.HTML.Events as HE
-import Halogen.VirtualDOM.Driver (runUI)
+import Halogen.VDom.Driver (runUI)
 
 import Child as Child
 

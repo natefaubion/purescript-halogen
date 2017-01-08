@@ -18,7 +18,7 @@ import DOM.HTML (window) as DOM
 import DOM.HTML.Types (htmlDocumentToDocument) as DOM
 import DOM.HTML.Types (HTMLElement, htmlElementToNode)
 import DOM.HTML.Window (document) as DOM
-import DOM.Node.Node (appendChild, parentNode, replaceChild)
+import DOM.Node.Node (appendChild, removeChild, parentNode, replaceChild)
 import DOM.Node.Types (Document, Element, Node) as DOM
 
 import Halogen.Aff.Driver (HalogenIO)
@@ -67,7 +67,7 @@ mkSpec handler renderChild document =
   buildWidget spec slot = do
     rsx <- renderChild slot
     let node = unRenderStateX (\(RenderState { node }) -> node) rsx
-    pure (V.Step node patch done)
+    pure (V.Step node patch (done node))
 
   patch
     :: V.VDomMachine (HalogenEffects eff)
@@ -76,10 +76,12 @@ mkSpec handler renderChild document =
   patch slot = do
     rsx <- renderChild slot
     let node = unRenderStateX (\(RenderState { node }) -> node) rsx
-    pure (V.Step node patch done)
+    pure (V.Step node patch (done node))
 
-  done :: Eff (HalogenEffects eff) Unit
-  done = pure unit
+  done :: DOM.Node -> Eff (HalogenEffects eff) Unit
+  done node = do
+    npn <- parentNode node
+    traverse_ (\pn -> removeChild node pn) (toMaybe npn)
 
 runUI
   :: forall f eff o

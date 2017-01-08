@@ -7,7 +7,7 @@ import Control.Monad.Eff (Eff)
 import Data.Maybe (Maybe(..))
 import Halogen as H
 import Halogen.Aff as HA
-import Halogen.VirtualDOM.Driver (runUI)
+import Halogen.VDom.Driver (runUI)
 import Button as B
 
 main :: Eff (HA.HalogenEffects (console :: CONSOLE)) Unit

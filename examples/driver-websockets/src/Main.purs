@@ -12,7 +12,7 @@ import Data.Either (Either(..))
 import Data.Maybe (Maybe(..))
 import Halogen as H
 import Halogen.Aff as HA
-import Halogen.VirtualDOM.Driver (runUI)
+import Halogen.VDom.Driver (runUI)
 import Log as Log
 import WebSocket as WS
 

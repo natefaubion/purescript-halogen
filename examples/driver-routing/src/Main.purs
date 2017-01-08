@@ -21,7 +21,7 @@ import DOM.HTML.Event.Types (HashChangeEvent, readHashChangeEvent) as DOM
 import DOM.HTML.Types (windowToEventTarget) as DOM
 import Halogen as H
 import Halogen.Aff as HA
-import Halogen.VirtualDOM.Driver (runUI)
+import Halogen.VDom.Driver (runUI)
 import RouteLog as RouteLog
 
 -- A producer coroutine that emits messages whenever the window emits a
