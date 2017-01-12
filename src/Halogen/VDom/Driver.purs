@@ -79,9 +79,7 @@ mkSpec handler renderChild document =
     pure (V.Step node patch (done node))
 
   done :: DOM.Node -> Eff (HalogenEffects eff) Unit
-  done node = do
-    npn <- parentNode node
-    traverse_ (\pn -> removeChild node pn) (toMaybe npn)
+  done node = pure unit
 
 runUI
   :: forall f eff o
@@ -97,7 +95,7 @@ renderSpec
    . DOM.Document
   -> HTMLElement
   -> AD.RenderSpec HTML RenderState eff
-renderSpec document container = { render, renderChild: id }
+renderSpec document container = { render, renderChild: id, removeChild: doRemoveChild }
   where
 
   render
@@ -120,6 +118,10 @@ renderSpec document container = { render, renderChild: id }
         let newNode = V.extract machine'
         when (not nodeRefEq node newNode) (substInParent node newNode)
         pure $ RenderState { machine: machine', node: newNode }
+
+  doRemoveChild (RenderState { node }) = do
+    npn <- parentNode node
+    traverse_ (\pn -> removeChild node pn) (toMaybe npn)
 
 substInParent :: forall eff. DOM.Node -> DOM.Node -> Eff (dom :: DOM | eff) Unit
 substInParent oldNode newNode = do

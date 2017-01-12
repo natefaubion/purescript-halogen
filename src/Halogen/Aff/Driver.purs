@@ -41,6 +41,7 @@ type RenderSpec h r eff =
       -> Maybe (r s f g p o eff)
       -> Eff (HalogenEffects eff) (r s f g p o eff)
   , renderChild :: forall s f g p o. r s f g p o eff -> r s f g p o eff
+  , removeChild :: forall s f g p o. r s f g p o eff -> Eff (HalogenEffects eff) Unit
   }
 
 runUI
@@ -136,8 +137,16 @@ runUI' lchs renderSpec component = do
         (renderChild childHandler ds.mkOrdBox ds.childrenIn ds.childrenOut)
         (ds.component.render ds.state)
         ds.rendering
+    prevChildren <- readRef ds.childrenIn
+    for_ prevChildren \var -> do
+      ds ← readRef var
+      renderStateX
+        case _ of
+          Nothing -> throw "Halogen internal error: child was not initialized in renderChild"
+          Just r -> renderSpec.removeChild r $> r
+        ds
+      addFinalizer ds
     children <- readRef ds.childrenOut
-    traverse_ (addFinalizer <=< readRef) =<< readRef ds.childrenIn
     modifyRef var \(DriverState ds') ->
       DriverState
         { rendering: Just rendering

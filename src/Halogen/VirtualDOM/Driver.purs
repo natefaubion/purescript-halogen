@@ -55,6 +55,7 @@ mkRenderSpec
 mkRenderSpec element fresh =
   { render
   , renderChild
+  , removeChild: const (pure unit)
   }
   where
 
